@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 评测产物：报告由脚本重新生成，不入库以避免 diff 噪声。
+# 但保留 comparison.md 的生成逻辑在 eval/ 脚本里。
+eval_results/
+lit-qa-agent/eval/questions.json
+task-assistant/eval/eval_set.json
+
+# 合成语料：由 eval/make_corpus.py 确定性生成（seed 固定）
+lit-qa-agent/data/corpus/
+
+# 模型 API Key 等敏感信息
+.env
+.env.*
+*.key
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
