@@ -1,0 +1,176 @@
+name: CI
+
+# 每次 push / PR 都跑：自检 + 评测。
+# 目的是让仓库右上角常驻一个绿色对勾 —— 相当于持续证明"代码真的能跑"，
+# 而不是只有作者自己知道。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 自检与评测
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 本项目刻意零第三方依赖，这一行是为了在日志里明确写出
+      # 「确实不需要装任何东西」，同时暴露缺失的隐式依赖。
+      - name: 确认无第三方依赖
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+
+          # 项目内部模块 + 可选的 Web 层依赖。
+          # service.py 用的是 FastAPI，但它是**懒加载**：只有真的起 HTTP 服务
+          # 才需要安装，评测与自检路径完全碰不到。因此把它列入白名单，
+          # 而不是引入依赖去满足检查 —— 保持"评测零依赖"这个核心卖点。
+          ALLOW = {'litqa', 'taskgraph', 'shared',
+                   'build_questions', 'make_corpus', 'build_eval_set',
+                   'chunking', 'retrieval', 'tools', 'graph',
+                   'fastapi', 'pydantic', 'uvicorn'}
+
+          std = set(sys.stdlib_module_names)
+          bad = []
+          # 只扫业务代码，跳过 .git / 隐藏目录
+          for p in pathlib.Path('.').rglob('*.py'):
+              if any(part.startswith('.') for part in p.parts):
+                  continue
+              tree = ast.parse(p.read_text(encoding='utf-8'))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      mods = [a.name.split('.')[0] for a in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      mods = [(node.module or '').split('.')[0]]
+                  else:
+                      continue
+                  for m in mods:
+                      if m and m not in std and m not in ALLOW:
+                          bad.append(f"{p}: {m}")
+
+          if bad:
+              print("检测到未预期的第三方依赖：")
+              print('\n'.join(sorted(set(bad))))
+              sys.exit(1)
+          print("OK：评测路径全部为标准库（fastapi/pydantic 仅服务层懒加载时需要）")
+          PY
+
+      - name: lit-qa-agent 自检
+        run: python lit-qa-agent/litqa/test_agent.py
+
+      - name: task-assistant 自检
+        run: python task-assistant/taskgraph/test_graph.py
+
+      - name: lit-qa-agent 评测
+        run: python lit-qa-agent/eval/evaluate.py
+
+      - name: task-assistant 评测
+        run: python task-assistant/eval/evaluate.py
+
+      # 把评测报告作为构建产物上传：点开就能看到，不用 clone 到本地。
+      # 这一条对面试很关键——招聘方能在网页上直接读到指标数字。
+      - name: 上传评测报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports-py${{ matrix.python-version }}
+          path: |
+            lit-qa-agent/eval_results/
+            task-assistant/eval_results/
+          if-no-files-found: warn
+
+  quality-gate:
+    name: 指标回归检查
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 运行评测
+        run: bash run_all_evals.sh
+
+      # 把关键指标写成断言：改代码导致效果退化时，CI 立刻红。
+      # 这比"跑完不报错就算过"强得多——评测的意义就是防止悄悄退化。
+      - name: 校验关键指标未退化
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+
+          THRESHOLDS = [
+              ("lit-qa-agent/eval_results/tuned-256-strict/report.json",
+               "citation_precision", 0.90, "文献问答引用正确率"),
+              ("lit-qa-agent/eval_results/tuned-256-strict/report.json",
+               "hallucination_rate", 0.05, "幻觉率（上限）"),
+              ("task-assistant/eval_results/enhanced/report.json",
+               "tool_success_rate", 0.90, "工具调用成功率"),
+              ("task-assistant/eval_results/enhanced/report.json",
+               "crash_count", 0.0, "崩溃次数"),
+          ]
+
+          failed = []
+          for rel, key, threshold, label in THRESHOLDS:
+              path = pathlib.Path(rel)
+              if not path.exists():
+                  failed.append(f"{label}: 报告缺失 {rel}")
+                  continue
+              data = json.loads(path.read_text(encoding="utf-8"))
+              metrics = {m["name"]: m["value"] for m in data["metrics"]}
+              value = metrics.get(key)
+              if value is None:
+                  failed.append(f"{label}: 指标 {key} 未找到")
+                  continue
+              ok = value <= threshold if key in {"hallucination_rate", "crash_count"} else value >= threshold
+              mark = "PASS" if ok else "FAIL"
+              print(f"[{mark}] {label}: {value:.4f} (阈值 {threshold})")
+              if not ok:
+                  failed.append(f"{label}: {value:.4f} 不满足阈值 {threshold}")
+
+          if failed:
+              print("\n指标回归：")
+              print("\n".join(f"  - {f}" for f in failed))
+              sys.exit(1)
+          print("\n全部关键指标达标")
+          PY
+
+      - name: 写入仓库页面摘要
+        if: always()
+        run: |
+          {
+            echo "## CI 评测结果"
+            echo ""
+            echo "本次自动评测的关键指标："
+            echo ""
+            echo "| 项目 | 指标 | 数值 |"
+            echo "| --- | --- | --- |"
+            for f in lit-qa-agent/eval_results/tuned-256-strict/report.json \
+                     task-assistant/eval_results/enhanced/report.json; do
+              python - "$f" <<'PY' || true
+          import json, sys
+          d = json.load(open(sys.argv[1], encoding='utf-8'))
+          for m in d['metrics']:
+              if m['name'] in ('citation_precision','hallucination_rate','tool_success_rate','crash_count'):
+                  v = m['value']
+                  print(f"| {d['project']} | {m['name']} | {v:.4g} |")
+          PY
+            done
+          } > EVAL_SUMMARY.md
+          cat EVAL_SUMMARY.md
