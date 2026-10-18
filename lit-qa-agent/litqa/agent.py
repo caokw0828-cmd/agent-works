@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from shared.llm.backend import estimate_tokens, get_backend  # noqa: E402
 
 from .chunking import Chunk, Document, load_documents, split_into_chunks  # noqa: E402
-from .retrieval import HybridRetriever, SearchHit, tokenize  # noqa: E402
+from .retrieval import HybridRetriever, SearchHit, make_retriever, tokenize  # noqa: E402
 
 PROMPT_TEMPLATE = """请仅依据下列资料回答问题，资料中没有的内容请直接说明无法回答。
 
@@ -73,6 +73,10 @@ class QAConfig:
     min_term_coverage: float = 0.34
     backend: str = "offline"
     label: str = "default"
+    # 切分方式：native（自研滑动窗口）/ langchain（RecursiveCharacterTextSplitter）
+    splitter: str = "native"
+    # 检索方式：bm25（对照组）/ vector（FAISS）
+    retriever: str = "bm25"
 
     def as_dict(self) -> dict:
         return {
@@ -83,6 +87,8 @@ class QAConfig:
             "min_score": self.min_score,
             "min_term_coverage": self.min_term_coverage,
             "backend": self.backend,
+            "splitter": self.splitter,
+            "retriever": self.retriever,
         }
 
 
@@ -122,10 +128,18 @@ class LiteratureQAAgent:
         self.docs: list[Document] = load_documents(data_dir)
         self.chunks: list[Chunk] = []
         for doc in self.docs:
-            self.chunks.extend(
-                split_into_chunks(doc, chunk_size=self.config.chunk_size, overlap=self.config.overlap)
-            )
-        self.retriever = HybridRetriever(self.chunks)
+            if self.config.splitter == "langchain":
+                from .retrieval import split_with_langchain
+                self.chunks.extend(
+                    split_with_langchain(doc, chunk_size=self.config.chunk_size,
+                                         overlap=self.config.overlap)
+                )
+            else:
+                self.chunks.extend(
+                    split_into_chunks(doc, chunk_size=self.config.chunk_size,
+                                      overlap=self.config.overlap)
+                )
+        self.retriever = make_retriever(self.config.retriever, self.chunks)
         self.llm = get_backend(self.config.backend)
         self.call_stats = {"llm_calls": 0, "errors": 0}
 
@@ -190,7 +204,14 @@ class LiteratureQAAgent:
         # 单一阈值不够稳——分数高不代表相关（虚词拉分），覆盖高也不代表
         # 足够相关（可能只是问题本身很短）。两者取"或"更保守，
         # 对史料溯源这类场景宁可拒答也不能给错出处。
-        low_score = not hits or top_score < self.config.min_score
+        #
+        # 阈值按检索器标定：两种检索的分数量纲完全不同
+        # （BM25 是加权和，通常 1~10；向量检索是归一化余弦，0~1）。
+        # 共用一个阈值会出现一种检索器全拒答、另一种永不拒答。
+        # 0.14 是实测分界：语料内问题 top-1 余弦落在 0.16~0.28，
+        # 语料外问题落在 0.05~0.11，两段不重叠。
+        threshold = self.config.min_score if self.config.retriever == "bm25" else 0.14
+        low_score = not hits or top_score < threshold
         low_coverage = coverage < self.config.min_term_coverage
         if low_score or low_coverage:
             reason = "检索得分不足" if low_score else "问题实词未覆盖"

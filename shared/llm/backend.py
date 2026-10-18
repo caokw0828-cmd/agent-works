@@ -135,8 +135,8 @@ class OfflineExtractiveBackend:
 class OpenAICompatibleBackend:
     """OpenAI 兼容接口后端。
 
-    刻意只依赖标准库：评测脚本不引入额外依赖，安装失败面最小。
-    代理环境下需自行设置 HTTPS_PROXY / NO_PROXY。
+    刻意只用标准库的 urllib：评测脚本不因网络客户端库的版本问题而失败，
+    安装失败面最小。代理环境下需自行设置 HTTPS_PROXY / NO_PROXY。
     """
 
     name = DEFAULT_ONLINE_MODEL

@@ -1,6 +1,9 @@
-"""最小化自检用例（零依赖）。
+"""自检用例。
 
 运行：python taskgraph/test_graph.py
+
+覆盖三类：计算器安全性、参数校验、执行图的终止与升级，
+以及 LangGraph 是否真的生效（而不是静默退化到手写实现）。
 """
 
 from __future__ import annotations
@@ -89,6 +92,51 @@ def test_no_duplicate_conclusions() -> None:
     state = TaskGraph().run("FastAPI 是什么？")
     tool_calls = [s for s in state.steps if s.node == "act"]
     assert len(tool_calls) == len(state.results), "工具调用次数应等于规划步数"
+
+
+# -- LangGraph 集成 --------------------------------------------------------
+
+
+def test_langgraph_is_actually_used() -> None:
+    """编排必须真的走 LangGraph，而不是退化到手写 while 循环。
+
+    这条测试存在的意义：如果哪天依赖装不上而代码静默回退到手写实现，
+    简历上"用 LangGraph 实现"就成了空话。这里直接断言图的类型。
+    """
+    from langgraph.graph.state import CompiledStateGraph
+
+    from taskgraph.graph import LangGraphTaskGraph
+
+    graph = LangGraphTaskGraph()
+    app = graph._build()
+    assert isinstance(app, CompiledStateGraph), "应编译成 LangGraph 的图"
+    assert set(app.nodes) >= {"plan", "act", "finish", "escalate"}, \
+        "四个节点都应注册进图里"
+
+
+def test_recursion_limit_caps_steps() -> None:
+    """recursion_limit 必须真的限制步数（对应手写版的 MAX_STEPS）。"""
+    state = TaskGraph().run("对比 BM25 与 FAISS 的差异，并计算 100 / 7")
+    assert state.step_count <= MAX_STEPS * 2, \
+        f"步数应受 recursion_limit 约束，实际 {state.step_count}"
+
+
+def test_handrolled_and_langgraph_agree() -> None:
+    """两套实现跑同一个任务，结论必须一致。
+
+    保留手写版的意义就是当对照组：如果哪天换框架改出行为差异，
+    这条测试会立刻发现，而不是等到线上出问题。
+    """
+    from taskgraph.graph import LangGraphTaskGraph
+
+    task = "FastAPI 是什么？"
+    lg = LangGraphTaskGraph(use_handrolled=False).run(task)
+    hr = LangGraphTaskGraph(use_handrolled=True).run(task)
+    assert lg.finished == hr.finished, "终止状态应一致"
+    assert lg.escalated == hr.escalated, "升级判断应一致"
+    assert len(lg.results) == len(hr.results), "规划步数应一致"
+    assert [r["tool"] for r in lg.results] == [r["tool"] for r in hr.results], \
+        "工具序列应一致"
 
 
 def run_all() -> int:

@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
-# 一键跑全部评测 + 自检。
+# 一键跑全部自检 + 评测。
 #
-# 刻意做到零第三方依赖：clone 下来直接执行，不需要 pip install，
-# 也不需要 API Key。面试现场演示时最怕的就是"我这里装不上"。
+# 项目二用 LangGraph 编排、项目一用 LangChain 切分，所以需要先装依赖。
+# 缺依赖时自动装一次；不需要 API Key。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${PYTHON:-python}"
 
+echo "=============================================="
+echo " 0/4  检查依赖"
+echo "=============================================="
+if ! "$PY" -c "import langgraph, langchain" >/dev/null 2>&1; then
+  echo "未检测到 LangChain / LangGraph，正在安装 requirements.txt ..."
+  "$PY" -m pip install -q -r "$ROOT/requirements.txt"
+fi
+"$PY" - <<'PY'
+import importlib
+missing = []
+for m in ("langgraph", "langchain", "langchain_core"):
+    try:
+        importlib.import_module(m)
+    except ImportError:
+        missing.append(m)
+print("依赖就绪" if not missing else f"缺少依赖: {missing}")
+PY
+
+echo ""
 echo "=============================================="
 echo " 1/4  lit-qa-agent 自检"
 echo "=============================================="
@@ -15,7 +34,7 @@ echo "=============================================="
 
 echo ""
 echo "=============================================="
-echo " 2/4  lit-qa-agent 评测（切分策略对照）"
+echo " 2/4  lit-qa-agent 评测（切分策略 + 检索方式对照）"
 echo "=============================================="
 "$PY" "$ROOT/lit-qa-agent/eval/evaluate.py"
 

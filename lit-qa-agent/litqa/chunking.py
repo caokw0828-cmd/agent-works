@@ -56,8 +56,7 @@ class Document:
 def load_documents(data_dir: Path) -> list[Document]:
     """从目录读取 .txt/.md 文献。
 
-    真实 PDF 用 pypdf 解析后转成同样的 Document 结构即可，
-    这里保留 txt 以保证仓库零依赖可跑。
+    真实 PDF 用 pypdf 解析后转成同样的 Document 结构即可。
     """
     docs: list[Document] = []
     for path in sorted(data_dir.glob("*")):

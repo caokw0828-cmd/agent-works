@@ -1,0 +1,15 @@
+# 核心框架：项目二用 LangGraph 编排，项目一用 LangChain 切分
+langgraph==1.2.16
+langchain==1.4.6
+langchain-core==1.6.12
+langchain-text-splitters==1.1.3
+
+# 向量检索对照组（仅 lit-qa-agent 的 vector 配置需要）
+langchain-community==0.4.2
+faiss-cpu==1.15.1
+numpy>=1.24
+
+# service.py 暴露 HTTP 接口时需要，不装也能跑全部自检与评测
+fastapi>=0.110
+pydantic>=2.6
+uvicorn>=0.29

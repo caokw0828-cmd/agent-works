@@ -28,25 +28,37 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # 本项目刻意零第三方依赖，这一行是为了在日志里明确写出
-      # 「确实不需要装任何东西」，同时暴露缺失的隐式依赖。
-      - name: 确认无第三方依赖
+      # 装 requirements.txt：项目二用 LangGraph 编排、项目一用 LangChain 切分，
+      # 这两个是硬依赖。评测数字建立在这些框架的真实行为上，不能省。
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # 只校验「import 的是不是 requirements.txt 里声明过的包」，
+      # 而不是「有没有第三方依赖」—— 现在框架是必需依赖，
+      # 但仍然要防止有人随手 import 一个没进清单的库。
+      - name: 校验依赖声明完整性
         run: |
           python - <<'PY'
           import ast, pathlib, sys
 
-          # 项目内部模块 + 可选的 Web 层依赖。
-          # service.py 用的是 FastAPI，但它是**懒加载**：只有真的起 HTTP 服务
-          # 才需要安装，评测与自检路径完全碰不到。因此把它列入白名单，
-          # 而不是引入依赖去满足检查 —— 保持"评测零依赖"这个核心卖点。
-          ALLOW = {'litqa', 'taskgraph', 'shared',
-                   'build_questions', 'make_corpus', 'build_eval_set',
-                   'chunking', 'retrieval', 'tools', 'graph',
-                   'fastapi', 'pydantic', 'uvicorn'}
+          # 项目内部模块：包名 + 包内的兄弟模块（相对导入 `from .chunking import`
+          # 的 module 为 None，会被解析成 'chunking'，所以兄弟模块名也要放进来）
+          INTERNAL = {'litqa', 'taskgraph', 'shared',
+                      'build_questions', 'make_corpus', 'build_eval_set',
+                      # lit-qa-agent/litqa/
+                      'chunking', 'retrieval', 'agent',
+                      # task-assistant/taskgraph/
+                      'tools', 'graph', 'graph_handrolled', 'service'}
+
+          # 允许的第三方：与 requirements.txt 对应
+          ALLOW = {'langgraph', 'langchain', 'langchain_core',
+                   'langchain_community', 'langchain_text_splitters',
+                   'faiss', 'numpy', 'fastapi', 'pydantic', 'uvicorn'}
 
           std = set(sys.stdlib_module_names)
           bad = []
-          # 只扫业务代码，跳过 .git / 隐藏目录
           for p in pathlib.Path('.').rglob('*.py'):
               if any(part.startswith('.') for part in p.parts):
                   continue
@@ -59,14 +71,14 @@ jobs:
                   else:
                       continue
                   for m in mods:
-                      if m and m not in std and m not in ALLOW:
+                      if m and m not in std and m not in INTERNAL and m not in ALLOW:
                           bad.append(f"{p}: {m}")
 
           if bad:
-              print("检测到未预期的第三方依赖：")
+              print("检测到未在 requirements.txt 声明的依赖：")
               print('\n'.join(sorted(set(bad))))
               sys.exit(1)
-          print("OK：评测路径全部为标准库（fastapi/pydantic 仅服务层懒加载时需要）")
+          print("OK：所有第三方 import 都在 requirements.txt 里")
           PY
 
       - name: lit-qa-agent 自检
@@ -104,6 +116,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
 
       - name: 运行评测
         run: bash run_all_evals.sh

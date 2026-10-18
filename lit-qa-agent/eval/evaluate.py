@@ -132,6 +132,25 @@ CONFIGS = [
     QAConfig(chunk_size=256, overlap=80, top_k=5, min_score=0.8, label="tuned-256-strict"),
 ]
 
+# LangChain + FAISS 对照组：同一套切分参数，只换切分器与检索器。
+# 它的作用是回答"换成向量检索到底值不值"，不参与最佳配置评选 ——
+# 结论不理想时如实呈现，不藏。
+LC_CONFIGS = [
+    QAConfig(chunk_size=320, overlap=64, top_k=4, label="lc-vector-320",
+             splitter="langchain", retriever="vector"),
+    QAConfig(chunk_size=256, overlap=80, top_k=5, label="lc-vector-256",
+             splitter="langchain", retriever="vector"),
+]
+
+
+def _has_vector_deps() -> bool:
+    try:
+        import langchain_community.vectorstores  # noqa: F401
+        import langgraph  # noqa: F401
+        return True
+    except Exception:
+        return False
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -171,16 +190,53 @@ def main() -> int:
     )
 
     # 对比表
-    lines = ["| 配置 | chunk | overlap | top_k | 引用正确率 | 覆盖率 | 拒答率 | 幻觉率 | 综合 |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    lines = [
+        "| 配置 | 切分 | 检索 | chunk | overlap | top_k | 引用正确率 | 覆盖率 | 拒答率 | 幻觉率 | 综合 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
     for report, _ in rows:
         c = report.config
         h = report.headline
         lines.append(
-            f"| {c['label']} | {c['chunk_size']} | {c['overlap']} | {c['top_k']} |"
+            f"| {c['label']} | {c.get('splitter', 'native')} | {c.get('retriever', 'bm25')} |"
+            f" {c['chunk_size']} | {c['overlap']} | {c['top_k']} |"
             f" {fmt_pct(h['citation_precision'])} | {fmt_pct(h['answer_coverage'])} |"
             f" {fmt_pct(h['abstention_rate'])} | {fmt_pct(h['hallucination_rate'])} |"
             f" {fmt_pct(h['overall_accuracy'])} |"
         )
+
+    # LangChain + FAISS 对照
+    if _has_vector_deps():
+        print("\n--- LangChain 切分 + FAISS 检索（对照，不参与最佳配置评选）---")
+        for cfg in LC_CONFIGS:
+            cfg.backend = args.backend
+            try:
+                report, _ = evaluate_config(data_dir, questions, cfg)
+            except ImportError as exc:
+                print(f"[{cfg.label}] 跳过：{exc}")
+                continue
+            rows.append((report, []))
+            c = report.config
+            h = report.headline
+            lines.append(
+                f"| {c['label']} | {c['splitter']} | {c['retriever']} |"
+                f" {c['chunk_size']} | {c['overlap']} | {c['top_k']} |"
+                f" {fmt_pct(h['citation_precision'])} | {fmt_pct(h['answer_coverage'])} |"
+                f" {fmt_pct(h['abstention_rate'])} | {fmt_pct(h['hallucination_rate'])} |"
+                f" {fmt_pct(h['overall_accuracy'])} |"
+            )
+            report.save(out_dir / c["label"])
+            print(
+                f"[{cfg.label:>16}] 引用正确率 {fmt_pct(h['citation_precision']):>7}"
+                f"  覆盖率 {fmt_pct(h['answer_coverage']):>7}"
+                f"  拒答率 {fmt_pct(h['abstention_rate']):>7}"
+                f"  幻觉率 {fmt_pct(h['hallucination_rate']):>7}"
+                f"  综合 {fmt_pct(h['overall_accuracy']):>7}"
+            )
+    else:
+        print("\n[跳过] LangChain + FAISS 对照组：依赖未安装"
+              "（pip install -r requirements.txt）")
+
     (out_dir / "comparison.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print("\n" + "\n".join(lines))

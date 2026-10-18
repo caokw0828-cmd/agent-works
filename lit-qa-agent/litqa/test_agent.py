@@ -1,7 +1,7 @@
 """最小化自检用例。
 
-不依赖 pytest，直接 `python litqa/test_agent.py` 即可运行，
-保证面试官 clone 下来不装任何东西也能看到测试通过。
+不依赖 pytest，直接 `python litqa/test_agent.py` 即可运行。
+涉及 LangChain / FAISS 的两条会在依赖缺失时自动跳过而不是报错。
 """
 
 from __future__ import annotations
@@ -81,6 +81,59 @@ def test_llm_failure_does_not_crash() -> None:
     ans = agent.ask("BM25与向量相似度的权重取值是多少？")
     assert agent.call_stats["errors"] == 1, "异常应被计数"
     assert ans.answer, "异常时仍应返回可读内容"
+
+
+# -- LangChain / FAISS 集成 ------------------------------------------------
+
+
+def _has_vector_deps() -> bool:
+    try:
+        import langchain_community.vectorstores  # noqa: F401
+        import langchain_text_splitters  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def test_langchain_splitter_keeps_cite_refs() -> None:
+    """换成 LangChain 切分器后，引用锚点必须仍然可用。
+
+    这是接入框架时最容易踩的坑：LangChain 返回的片段如果沿用它自己的
+    编号，`cite_ref` 会和 BM25 那边的对不上，跨检索器的引用就失效了。
+    """
+    if not _has_vector_deps():
+        print("      (跳过：未安装 langchain)")
+        return
+    from litqa.retrieval import split_with_langchain
+
+    data_dir = _ensure_corpus()
+    doc = load_documents(data_dir)[0]
+    chunks = split_with_langchain(doc, chunk_size=256, overlap=80)
+    assert chunks, "LangChain 切分器应产出片段"
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks))), \
+        "chunk_index 必须重新连续编号，否则 cite_ref 会漂移"
+    assert all(c.doc_id == doc.doc_id for c in chunks), "doc_id 应随片段保留"
+    assert all("#c" in c.cite_ref for c in chunks), "cite_ref 格式应保持一致"
+
+
+def test_vector_retriever_returns_same_chunk_objects() -> None:
+    """向量检索拿回的片段必须与 BM25 那边是同一批对象。
+
+    如果这里返回的是新建对象，引用逻辑就会在两条路径上分叉，
+    后续加新检索器时极易漏改。
+    """
+    if not _has_vector_deps():
+        print("      (跳过：未安装 faiss)")
+        return
+    from litqa.agent import QAConfig as _QAConfig
+
+    agent = LiteratureQAAgent(_ensure_corpus(), _QAConfig(
+        chunk_size=320, overlap=64, top_k=4, splitter="langchain", retriever="vector"))
+    hits = agent.retriever.search("BM25 与向量相似度的权重", top_k=3)
+    assert hits, "向量检索应有结果"
+    for h in hits:
+        assert any(h.chunk is c for c in agent.chunks), "应返回 Chunk 原对象"
+        assert h.chunk.cite_ref, "片段应带引用锚点"
 
 
 def run_all() -> int:
